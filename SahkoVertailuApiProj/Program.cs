@@ -3,14 +3,14 @@ using System.Globalization;
 using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
+var settings = builder.Configuration.GetSection("SahkoVertailu");
 
 builder.Services.AddHttpClient("Sahkonhinta", client =>
 {
-    client.BaseAddress = new Uri(
-        "https://ev-shv-prod-app-wa-consumerapi1.azurewebsites.net/");
-    client.Timeout = TimeSpan.FromSeconds(30);
-    client.DefaultRequestHeaders.UserAgent.ParseAdd(
-        "SahkoVertailuApi/1.0");
+    client.BaseAddress = new Uri(settings["PalvelunBaseUrl"]!);
+    client.Timeout = TimeSpan.FromSeconds(
+        settings.GetValue<int>("HttpTimeoutSekuntia"));
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(settings["UserAgent"]!);
 });
 
 var app = builder.Build();
@@ -19,17 +19,24 @@ app.MapGet("/", () => Results.Ok(new
 {
     name = "Sähkönhinta REST API",
     endpoint = "/api/sahkosopimukset",
-    example = "/api/sahkosopimukset?postinumero=53850&vuosikulutus=6000"
+    example = "/api/sahkosopimukset"
 }));
 
 app.MapGet("/api/sahkosopimukset", async (
     IHttpClientFactory factory,
-    string postinumero = "53850",
-    int vuosikulutus = 6000,
-    string hinnoittelumalli = "kiinteä",
-    string kohderyhma = "kotitalous",
+    IConfiguration configuration,
+    string? postinumero = null,
+    int? vuosikulutus = null,
+    string? hinnoittelumalli = null,
+    string? kohderyhma = null,
     CancellationToken cancellationToken = default) =>
 {
+    var options = configuration.GetSection("SahkoVertailu");
+    postinumero ??= options["OletusPostinumero"]!;
+    vuosikulutus ??= options.GetValue<int>("OletusVuosikulutusKwh");
+    hinnoittelumalli ??= options["Hinnoittelumalli"]!;
+    kohderyhma ??= options["Kohderyhma"]!;
+
     if (postinumero.Length != 5 ||
         !postinumero.All(char.IsDigit))
     {
@@ -133,7 +140,7 @@ app.MapGet("/api/sahkosopimukset", async (
                 continue;
 
             decimal annualCost =
-                energyPrice.Value * vuosikulutus / 100m
+                energyPrice.Value * vuosikulutus.Value / 100m
                 + monthlyFee * 12m;
 
             string company = "";
@@ -172,9 +179,9 @@ app.MapGet("/api/sahkosopimukset", async (
             {
                 postinumero,
                 vuosikulutusKwh = vuosikulutus,
-                hinnoittelumalli = "kiinteä",
-                kohderyhma = "kotitalous",
-                sopimuksenKesto = "kaikki"
+                hinnoittelumalli,
+                kohderyhma,
+                sopimuksenKesto = options["SopimuksenKesto"]
             },
             huomautus =
                 "Postinumeron alueellista saatavuutta ei ole varmistettu. " +
