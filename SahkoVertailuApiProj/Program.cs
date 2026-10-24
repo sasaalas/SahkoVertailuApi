@@ -5,6 +5,15 @@ using System.Text.Json;
 var builder = WebApplication.CreateBuilder(args);
 var settings = builder.Configuration.GetSection("SahkoVertailu");
 
+var databasePath = Environment.GetEnvironmentVariable("SAHKOVERTAILU_DB_PATH")
+    ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "data",
+        "sahkovertailu.db");
+var database = new SahkoTietokanta(databasePath);
+await database.InitializeAsync();
+builder.Services.AddSingleton(database);
+
 builder.Services.AddHttpClient("Sahkonhinta", client =>
 {
     client.BaseAddress = new Uri(settings["PalvelunBaseUrl"]!);
@@ -25,6 +34,7 @@ app.MapGet("/", () => Results.Ok(new
 app.MapGet("/api/sahkosopimukset", async (
     IHttpClientFactory factory,
     IConfiguration configuration,
+    SahkoTietokanta database,
     string? postinumero = null,
     int? vuosikulutus = null,
     string? hinnoittelumalli = null,
@@ -96,7 +106,7 @@ app.MapGet("/api/sahkosopimukset", async (
                 statusCode: 502);
         }
 
-        var contracts = new List<object>();
+        var contracts = new List<SahkoSopimus>();
 
         foreach (var product in document.RootElement.EnumerateArray())
         {
@@ -147,34 +157,35 @@ app.MapGet("/api/sahkosopimukset", async (
             if (TryProperty(product, "Company", out var companyElement))
                 company = GetString(companyElement, "Name");
 
-            contracts.Add(new
-            {
-                yhtiö = company,
-                nimi = GetString(product, "Name"),
-                sopimustyyppi = GetString(details, "ContractType"),
-                kesto = GetString(details, "FixedTimeRange"),
-                energiahintaSntKwh = energyPrice.Value,
-                perusmaksuEurKuukausi = monthlyFee,
-                arvioituVuosikustannusEur =
-                    Math.Round(annualCost, 2),
+            contracts.Add(new SahkoSopimus(
+                company,
+                GetString(product, "Name"),
+                GetString(details, "ContractType"),
+                GetString(details, "FixedTimeRange"),
+                energyPrice.Value,
+                monthlyFee,
+                Math.Round(annualCost, 2),
                 postinumero,
-                vuosikulutusKwh = vuosikulutus
-            });
+                vuosikulutus.Value));
         }
 
         var sorted = contracts
-            .OrderBy(item =>
-            {
-                var property = item.GetType()
-                    .GetProperty("arvioituVuosikustannusEur");
-
-                return (decimal)(property!.GetValue(item) ?? 0m);
-            })
+            .OrderBy(item => item.Vuosikustannus)
             .ToList();
+
+        var fetchedAt = DateTimeOffset.UtcNow;
+        await database.SaveSearchAsync(
+            fetchedAt,
+            postinumero,
+            vuosikulutus.Value,
+            hinnoittelumalli,
+            kohderyhma,
+            sorted,
+            cancellationToken);
 
         return Results.Ok(new
         {
-            haettu = DateTimeOffset.UtcNow,
+            haettu = fetchedAt,
             hakuehdot = new
             {
                 postinumero,
@@ -187,7 +198,18 @@ app.MapGet("/api/sahkosopimukset", async (
                 "Postinumeron alueellista saatavuutta ei ole varmistettu. " +
                 "Hinnat eivät sisällä sähkönsiirtoa.",
             sopimuksia = sorted.Count,
-            tulokset = sorted
+            tulokset = sorted.Select(item => new
+            {
+                yhtiö = item.Yhtio,
+                nimi = item.Nimi,
+                sopimustyyppi = item.Sopimustyyppi,
+                kesto = item.Kesto,
+                energiahintaSntKwh = item.EnergiahintaSntKwh,
+                perusmaksuEurKuukausi = item.PerusmaksuEurKuukausi,
+                arvioituVuosikustannusEur = item.Vuosikustannus,
+                item.Postinumero,
+                vuosikulutusKwh = item.VuosikulutusKwh
+            })
         });
     }
     catch (HttpRequestException)
